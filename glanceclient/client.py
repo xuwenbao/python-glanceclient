@@ -18,31 +18,28 @@ import warnings
 from glanceclient.common import utils
 
 
-def Client(version=None, endpoint=None, *args, **kwargs):
-    """Client for the OpenStack Images API.
-
-    Generic client for the OpenStack Images API. See version classes
-    for specific details.
-
-    :param string version: The version of API to use. Note this is
-                           deprecated and should be passed as part of the URL
-                           (http://$HOST:$PORT/v$VERSION_NUMBER).
-    """
-    if version is not None:
-        warnings.warn(("`version` keyword is being deprecated. Please pass the"
-                       " version as part of the URL. "
-                       "http://$HOST:$PORT/v$VERSION_NUMBER"),
-                      DeprecationWarning)
-
-    endpoint, url_version = utils.strip_version(endpoint)
-
-    if not url_version and not version:
-        msg = ("Please provide either the version or an url with the form "
-               "http://$HOST:$PORT/v$VERSION_NUMBER")
+def Client(version=None, endpoint=None, session=None, *args, **kwargs):
+    if session and endpoint:
+        msg = ("You cannot provide an endpoint URL with the session. The "
+               "endpoint will be retrieved from the auth plugin's catalog")
         raise RuntimeError(msg)
 
-    version = int(version or url_version)
+    elif not session:
+        if version is not None:
+            warnings.warn(("`version` keyword is being deprecated. Please pass"
+                           " the version as part of the URL. "
+                           "http://$HOST:$PORT/v$VERSION_NUMBER"),
+                          DeprecationWarning)
+
+        endpoint, url_version = utils.strip_version(endpoint)
+
+        if not url_version and not version:
+            msg = ("Please provide either the version or an url with the form "
+                   "http://$HOST:$PORT/v$VERSION_NUMBER")
+            raise RuntimeError(msg)
+
+        version = int(version or url_version)
 
     module = utils.import_versioned_module(version, 'client')
     client_class = getattr(module, 'Client')
-    return client_class(endpoint, *args, **kwargs)
+    return client_class(endpoint, *args, session=session, **kwargs)

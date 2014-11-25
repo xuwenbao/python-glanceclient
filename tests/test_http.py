@@ -14,10 +14,13 @@
 #    under the License.
 import json
 
+from keystoneclient.auth import token_endpoint
+from keystoneclient import session
 import requests
 from requests_mock.contrib import fixture
 import six
 from six.moves.urllib import parse
+from testscenarios import load_tests_apply_scenarios as load_tests  # noqa
 import testtools
 import types
 
@@ -30,12 +33,27 @@ from tests import utils
 
 class TestClient(testtools.TestCase):
 
+    scenarios = [
+        ('httpclient', {'create_client': '_create_http_client'}),
+        ('session', {'create_client': '_create_session_client'})
+    ]
+
+    def _create_http_client(self):
+        return http.HTTPClient(self.endpoint, token=self.token)
+
+    def _create_session_client(self):
+        auth = token_endpoint.Token(self.endpoint, self.token)
+        sess = session.Session(auth=auth)
+        return http.SessionClient(sess)
+
     def setUp(self):
         super(TestClient, self).setUp()
         self.mock = self.useFixture(fixture.Fixture())
 
         self.endpoint = 'http://example.com:9292'
-        self.client = http.HTTPClient(self.endpoint, token=u'abc123')
+        self.token = u'abc123'
+
+        self.client = getattr(self, self.create_client)()
 
     def test_identity_headers_and_token(self):
         identity_headers = {
@@ -137,6 +155,9 @@ class TestClient(testtools.TestCase):
         self.assertEqual(text, resp.text)
 
     def test_headers_encoding(self):
+        if not hasattr(self.client, 'encode_headers'):
+            self.skipTest('Cannot do header encoding check on SessionClient')
+
         value = u'ni\xf1o'
         headers = {"test": value, "none-val": None}
         encoded = self.client.encode_headers(headers)
@@ -204,6 +225,9 @@ class TestClient(testtools.TestCase):
         self.assertEqual([data], list(body))
 
     def test_log_http_response_with_non_ascii_char(self):
+        if not hasattr(self.client, 'log_http_response'):
+            self.skipTest('Cannot do log checking on SessionClient')
+
         try:
             response = 'Ok'
             headers = {"Content-Type": "text/plain",

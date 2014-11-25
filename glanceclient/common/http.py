@@ -17,6 +17,8 @@ import copy
 import logging
 import socket
 
+from keystoneclient import adapter
+from keystoneclient import exceptions as ksc_exc
 from oslo_utils import importutils
 from oslo_utils import netutils
 import requests
@@ -48,6 +50,15 @@ osprofiler_web = importutils.try_import("osprofiler.web")
 LOG = logging.getLogger(__name__)
 USER_AGENT = 'python-glanceclient'
 CHUNKSIZE = 1024 * 64  # 64kB
+
+
+def chunk_body(body):
+    chunk = body
+    while chunk:
+        chunk = body.read(CHUNKSIZE)
+        if chunk == '':
+            break
+        yield chunk
 
 
 class HTTPClient(object):
@@ -165,14 +176,6 @@ class HTTPClient(object):
         # Default Content-Type is octet-stream
         content_type = headers.get('Content-Type', 'application/octet-stream')
 
-        def chunk_body(body):
-            chunk = body
-            while chunk:
-                chunk = body.read(CHUNKSIZE)
-                if chunk == '':
-                    break
-                yield chunk
-
         data = kwargs.pop("data", None)
         if data is not None and not isinstance(data, six.string_types):
             try:
@@ -283,3 +286,77 @@ def _close_after_stream(response, chunk_size):
     # This will return the connection to the HTTPConnectionPool in urllib3
     # and ideally reduce the number of HTTPConnectionPool full warnings.
     response.close()
+
+
+class SessionClient(adapter.Adapter):
+
+    def __init__(self, session, **kwargs):
+        kwargs.setdefault('user_agent', USER_AGENT)
+        kwargs.setdefault('service_type', 'image')
+        super(SessionClient, self).__init__(session, **kwargs)
+
+    def request(self, url, method, **kwargs):
+        headers = kwargs.setdefault('headers', {})
+        content_type = headers.get('Content-Type', 'application/octet-stream')
+
+        data = kwargs.pop("data", None)
+        if data is not None and not isinstance(data, six.string_types):
+            try:
+                data = json.dumps(data)
+                content_type = 'application/json'
+            except TypeError:
+                # Here we assume it's a file-like object and we'll chunk it
+                data = chunk_body(data)
+
+        headers['Content-Type'] = content_type
+        kwargs['data'] = data
+        kwargs['raise_exc'] = False
+        kwargs['stream'] = content_type == 'application/octet-stream'
+
+        try:
+            resp = super(SessionClient, self).request(url, method, **kwargs)
+        except ksc_exc.RequestTimeout as e:
+            message = ("Error communicating with %(endpoint)s %(e)s" %
+                       dict(url=conn_url, e=e))
+            raise exc.InvalidEndpoint(message=message)
+        except ksc_exc.ConnectionRefused as e:
+            conn_url = self.get_endpoint(auth=kwargs.get('auth'))
+            message = ("Error finding address for %(url)s: %(e)s" %
+                       dict(url=conn_url, e=e))
+            raise exc.CommunicationError(message=message)
+
+        if not resp.ok:
+            LOG.debug("Request returned failure status %s." % resp.status_code)
+            raise exc.from_response(resp, resp.content)
+        elif resp.status_code == requests.codes.MULTIPLE_CHOICES:
+            raise exc.from_response(resp)
+
+        content_type = resp.headers.get('Content-Type')
+
+        # Read body into string if it isn't obviously image data
+        if content_type == 'application/octet-stream':
+            # Do not read all response in memory when downloading an image.
+            body_iter = _close_after_stream(resp, CHUNKSIZE)
+        else:
+            content = resp.content
+            if content_type and content_type.startswith('application/json'):
+                # Let's use requests json method, it should take care of
+                # response encoding
+                body_iter = resp.json()
+            else:
+                body_iter = six.StringIO(content)
+                try:
+                    body_iter = json.loads(''.join([c for c in body_iter]))
+                except ValueError:
+                    body_iter = None
+        return resp, body_iter
+
+
+def get_http_client(endpoint=None, session=None, **kwargs):
+    if endpoint:
+        return HTTPClient(endpoint, **kwargs)
+    elif session:
+        return SessionClient(session, **kwargs)
+    else:
+        raise AttributeError('Constructing a client must contain either an '
+                             'endpoint or a session')
